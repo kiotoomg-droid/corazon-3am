@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Corazón para mi amor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  body { background: #000; -webkit-user-select: none; user-select: none; }
+  canvas { display: block; position: fixed; inset: 0; z-index: 0; touch-action: none; cursor: grab; }
+  canvas.grabbing { cursor: grabbing; }
+
+  #ui {
+    position: fixed;
+    bottom: 26px; left: 50%;
+    transform: translateX(-50%);
+    z-index: 5;
+    display: flex; gap: 12px;
+  }
+  #ui button {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #fff;
+    background: rgba(255,105,170,0.22);
+    border: 1.5px solid rgba(255,140,190,0.8);
+    padding: 11px 22px;
+    border-radius: 24px;
+    cursor: pointer;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 4px 16px rgba(255,105,170,0.25);
+    transition: transform 0.15s ease, background 0.2s ease;
+  }
+  #ui button:hover { transform: scale(1.06); background: rgba(255,105,170,0.35); }
+  #ui button:active { transform: scale(0.97); }
+
+  #hint {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    z-index: 5; color: rgba(255,170,210,0.85);
+    font-family: 'Segoe UI', system-ui, sans-serif; font-size: 0.82rem;
+    text-align: center; white-space: nowrap; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div id="hint">Arrastra con el dedo o el ratón para girar · pellizca o usa la rueda para acercar</div>
+  <div id="ui">
+    <button id="toggleShape">✨ I LOVE U <3</button>
+    <button id="toggleMusic">🎵 Música</button>
+  </div>
+<script>
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d');
+  var W, H, cx, cy, DPR, focal;
+  var cameraZ = 34;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    cx = W / 2; cy = H / 2;
+    focal = (H / 2) / Math.tan(30 * Math.PI / 180);
+  }
+
+  var COUNT = (Math.min(window.innerWidth, window.innerHeight) < 600) ? 12000 : 22000;
+  var P = new Float32Array(COUNT * 3);
+  var S = new Float32Array(COUNT * 3);
+  var D = new Float32Array(COUNT);
+  function rand(a, b) { return a + Math.random() * (b - a); }
+
+  function buildTextTargets(text) {
+    var off = document.createElement('canvas');
+    var octx = off.getContext('2d');
+    var fontPx = 170;
+    var font = 'italic bold ' + fontPx + 'px Georgia, "Times New Roman", serif';
+    octx.font = font;
+    var w = Math.ceil(octx.measureText(text).width) + 60;
+    var h = fontPx + 90;
+    off.width = w; off.height = h;
+    octx.font = font;
+    octx.fillStyle = '#fff';
+    octx.textAlign = 'center';
+    octx.textBaseline = 'middle';
+    octx.fillText(text, w / 2, h / 2);
+    var data = octx.getImageData(0, 0, w, h).data;
+    var pts = [], step = 3;
+    for (var yy = 0; yy < h; yy += step) {
+      for (var xx = 0; xx < w; xx += step) {
+        if (data[(yy * w + xx) * 4 + 3] > 128) pts.push([xx, yy]);
+      }
+    }
+    var targetW = 46;
+    var sc = targetW / w;
+    var model = [];
+    for (var p = 0; p < pts.length; p++) {
+      model.push([(pts[p][0] - w / 2) * sc, -(pts[p][1] - h / 2) * sc]);
+    }
+    return model;
+  }
+  var textPts = buildTextTargets('I LOVE U <3');
+
+  for (var i = 0; i < COUNT; i++) {
+    var t = Math.random() * Math.PI * 2;
+    var x = 16 * Math.pow(Math.sin(t), 3);
+    var y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
+    var r = Math.sqrt(Math.random());
+    var px = x * r, py = y * r, pz = rand(-3, 3);
+    P[i * 3] = px; P[i * 3 + 1] = py; P[i * 3 + 2] = pz;
+    D[i] = Math.sqrt(px * px + py * py);
+
+    var tp = textPts.length ? textPts[(Math.random() * textPts.length) | 0] : [0, 0];
+    S[i * 3] = tp[0] + rand(-0.25, 0.25);
+    S[i * 3 + 1] = tp[1] + rand(-0.25, 0.25);
+    S[i * 3 + 2] = rand(-1, 1);
+  }
+
+  var maxD = 0;
+  for (var md = 0; md < COUNT; md++) { if (D[md] > maxD) maxD = D[md]; }
+
+  var BUCKETS = 10;
+  var colors = [], sizes = [];
+  (function () {
+    var c0 = [255, 85, 160];
+    var c1 = [255, 170, 225];
+    for (var b = 0; b < BUCKETS; b++) {
+      var f = b / (BUCKETS - 1);
+      var Rr = Math.round(c0[0] + (c1[0] - c0[0]) * f);
+      var Gg = Math.round(c0[1] + (c1[1] - c0[1]) * f);
+      var Bb = Math.round(c0[2] + (c1[2] - c0[2]) * f);
+      var a = 0.22 + f * 0.75;
+      colors.push('rgba(' + Rr + ',' + Gg + ',' + Bb + ',' + a.toFixed(3) + ')');
+      sizes.push(1 + f * 1.6);
+    }
+  })();
+
+  var bx = [], by = [];
+  for (var k = 0; k < BUCKETS; k++) { bx.push([]); by.push([]); }
+
+  var rotY = 0, rotX = 0;
+  var zoom = 1, zoomTarget = 1;
+  var morph = 0, morphTarget = 0;
+  var dragging = false, lastX = 0, lastY = 0;
+
+  function animate(now) {
+    requestAnimationFrame(animate);
+    var t = now * 0.001;
+
+    zoom += (zoomTarget - zoom) * 0.08;
+    morph += (morphTarget - morph) * 0.05;
+    var heartFactor = 1 - morph;
+
+    if (!dragging && morphTarget < 0.5) rotY += 0.004;
+
+    var period = 1.5, travel = 1.0;
+    var cycleT = t % period;
+    var beat = (0.14 * Math.exp(-cycleT * 7) + 0.07 * Math.exp(-Math.max(0, cycleT - 0.17) * 9)) * heartFactor;
+    var scaleM = 1 + beat;
+
+    var waveActive = cycleT < travel && heartFactor > 0.02;
+    var frontR = (cycleT / travel) * (maxD + 3);
+    var sigma = 2.6;
+
+    var cosY = Math.cos(rotY), sinY = Math.sin(rotY);
+    var cosX = Math.cos(rotX), sinX = Math.sin(rotX);
+
+    for (var b = 0; b < BUCKETS; b++) { bx[b].length = 0; by[b].length = 0; }
+
+    for (var i = 0; i < COUNT; i++) {
+      var mx = (P[i * 3] + (S[i * 3] - P[i * 3]) * morph) * scaleM;
+      var my = (P[i * 3 + 1] + (S[i * 3 + 1] - P[i * 3 + 1]) * morph) * scaleM;
+      var mz = (P[i * 3 + 2] + (S[i * 3 + 2] - P[i * 3 + 2]) * morph) * scaleM;
+
+      var xr = mx * cosY - mz * sinY;
+      var zr = mx * sinY + mz * cosY;
+      var yr = my * cosX - zr * sinX;
+      var z2 = my * sinX + zr * cosX;
+      var x2 = xr;
+
+      var depth = cameraZ - z2;
+      if (depth <= 0.1) continue;
+      var s = focal / depth * zoom;
+      var sx = cx + x2 * s;
+      var sy = cy - yr * s;
+
+      var depthNorm = (z2 + 16) / 32;
+      if (depthNorm < 0) depthNorm = 0; if (depthNorm > 1) depthNorm = 1;
+
+      var ring = 0;
+      if (waveActive) {
+        var dd = (D[i] - frontR) / sigma;
+        ring = Math.exp(-dd * dd) * heartFactor;
+      }
+      var base = 0.22 + 0.5 * morph;
+      var bright = (base + 0.8 * ring) * (0.55 + 0.45 * depthNorm);
+
+      var idx = (bright * BUCKETS) | 0;
+      if (idx < 0) idx = 0; if (idx >= BUCKETS) idx = BUCKETS - 1;
+      bx[idx].push(sx); by[idx].push(sy);
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (var b2 = 0; b2 < BUCKETS; b2++) {
+      var xs = bx[b2], ys = by[b2];
+      if (!xs.length) continue;
+      ctx.fillStyle = colors[b2];
+      var sz = sizes[b2], half = sz / 2;
+      for (var j = 0; j < xs.length; j++) {
+        ctx.fillRect(xs[j] - half, ys[j] - half, sz, sz);
+      }
+    }
+
+    // ---- Renderizado Karaoke Sincronizado ----
+    if (lyricsOn && lyrics.length) {
+      var ctime = audio.currentTime;
+      var li = -1;
+      for (var q = 0; q < lyrics.length; q++) { if (ctime >= lyrics[q].t) li = q; else break; }
+      if (li !== curLine) {
+        curLine = li;
+        curPts = (li >= 0 && lyrics[li].text) ? buildLyricPoints(lyrics[li].text, Math.min(W * 0.82, 720)) : null;
+        lineT0 = now * 0.001;
+      }
+      if (curPts && curPts.length) {
+        var age = now * 0.001 - lineT0;
+        var fade = Math.min(1, age / 0.25);
+        var lp = 1 + 0.03 * Math.sin(now * 0.004);
+        var baseY = H * 0.82;
+        ctx.fillStyle = 'rgba(255,255,255,' + (0.95 * fade).toFixed(3) + ')';
+        for (var w2 = 0; w2 < curPts.length; w2++) {
+          ctx.fillRect(cx + curPts[w2][0] * lp - 0.9, baseY - curPts[w2][1] * lp - 0.9, 1.8, 1.8);
+        }
+      }
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function startDrag(x, y) { dragging = true; lastX = x; lastY = y; canvas.classList.add('grabbing'); }
+  function moveDrag(x, y) {
+    if (!dragging) return;
+    rotY += (x - lastX) * 0.006;
+    rotX += (y - lastY) * 0.006;
+    rotX = Math.max(-1.3, Math.min(1.3, rotX));
+    lastX = x; lastY = y;
+  }
+  function endDrag() { dragging = false; canvas.classList.remove('grabbing'); }
+
+  canvas.addEventListener('mousedown', function (e) { startDrag(e.clientX, e.clientY); });
+  window.addEventListener('mousemove', function (e) { moveDrag(e.clientX, e.clientY); });
+  window.addEventListener('mouseup', endDrag);
+  canvas.addEventListener('wheel', function (e) {
+    e.preventDefault();
+    zoomTarget *= (e.deltaY < 0) ? 1.12 : 0.89;
+    zoomTarget = Math.max(0.4, Math.min(3.2, zoomTarget));
+  }, { passive: false });
+
+  var pinchDist = 0;
+  canvas.addEventListener('touchstart', function (e) {
+    if (e.touches.length === 1) startDrag(e.touches[0].clientX, e.touches[0].clientY);
+    else if (e.touches.length === 2) pinchDist = 0;
+  }, { passive: true });
+  canvas.addEventListener('touchmove', function (e) {
+    if (e.touches.length === 1) {
+      moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+    } else if (e.touches.length === 2) {
+      var dx = e.touches[0].clientX - e.touches[1].clientX;
+      var dy = e.touches[0].clientY - e.touches[1].clientY;
+      var d = Math.sqrt(dx * dx + dy * dy);
+      if (pinchDist) { zoomTarget *= d / pinchDist; zoomTarget = Math.max(0.4, Math.min(3.2, zoomTarget)); }
+      pinchDist = d;
+    }
+  }, { passive: true });
+  canvas.addEventListener('touchend', function () { endDrag(); pinchDist = 0; });
+
+  // ---- Audio y Matriz de Tiempos Exactos (LRC Integrado) ----
+  var audio = new Audio('Por Ti - 3AM.mp3');
+  audio.loop = true;
+  var lyricsOn = false, curLine = -1, curPts = null, lineT0 = 0;
+
+  var lyrics = [
+    { t: 2.74, text: "Ah, ahora solo pienso en ti durante el día" },
+    { t: 13.76, text: "Y por las noches en mis sueños te sueles aparecer" },
+    { t: 16.80, text: "Cuando me hablas solo escucho melodías" },
+    { t: 18.82, text: "Tal vez por eso decías que me aburrías y que no te podía entender" },
+    { t: 22.42, text: "Ya no importa que tan mal vaya mi día" },
+    { t: 24.44, text: "Sé que va a ser un buen día siempre" },
+    { t: 26.14, text: "Y cuando te encuentre incluido en él" },
+    { t: 28.18, text: "Soy capaz de cosas que antes no podía" },
+    { t: 30.04, text: "Ni a mí mismo me quería" },
+    { t: 31.46, text: "Y ahora quiero quererte hasta envejecer" },
+    { t: 33.62, text: "Porque aunque estoy medio ciego desde tan lejos te vi" },
+    { t: 38.94, text: "Mi memoria es una mierda" },
+    { t: 41.72, text: "Pero siempre me acuerdo de ti" },
+    { t: 45.06, text: "No sé diferenciar entre una alfombra y un tapiz" },
+    { t: 50.20, text: "Si antes no servía pa' nada" },
+    { t: 53.02, text: "Y ahora sirvo pa' quererte a ti" },
+    { t: 58.30, text: "Pa' quererte a ti" },
+    { t: 60.38, text: "Ahora sirvo pa quererte a ti" },
+    { t: 63.92, text: "Pa' quererte a ti" },
+    { t: 66.08, text: "Ah, ah, ah" },
+    { t: 68.04, text: "Porque entre todas solo ella a mí me conoce" },
+    { t: 70.92, text: "Ella es un ángel diabla después de las doce" },
+    { t: 73.68, text: "Ya estando al filo, fue mi medicina en dosis" },
+    { t: 76.52, text: "Soy intranquilo, pero ella me hace tan dócil" },
+    { t: 78.78, text: "Si te digo princesa no es que yo sea cursi" },
+    { t: 81.12, text: "Solo quiero quererte, baby, no te asustes" },
+    { t: 83.90, text: "Si alguien no está de acuerdo dile que me busque" },
+    { t: 86.76, text: "Yo quiero estar contigo guste a quien le guste" },
+    { t: 90.66, text: "Y es que aunque a veces te sientas tan insegura" },
+    { t: 92.94, text: "Tú, tranquila que te quiero con locura" },
+    { t: 95.12, text: "Y el amor todo lo cura" },
+    { t: 96.44, text: "Quién sabe al final si en realidad esto dura" },
+    { t: 98.78, text: "Pero la vida es tan dura, y esa sonrisa tan pura" },
+    { t: 101.40, text: "Que me hace querer ser la mejor persona" },
+    { t: 103.48, text: "El mejor en la calle, el mejor en la cama" },
+    { t: 105.56, text: "El mejor en la zona (ah, fuck me)" },
+    { t: 107.00, text: "Me hace querer ser la mejor versión de mí y de todas" },
+    { t: 109.72, text: "Me hace querer ser la mejor opción pa' ti, pa' todas" },
+    { t: 112.52, text: "Y a todas estas no sé si merezca" },
+    { t: 115.18, text: "Que tú ahora estés conmigo, estar contigo" },
+    { t: 118.52, text: "Y en esta historia aunque parezca" },
+    { t: 120.82, text: "Ser un amor prohibido estaré contigo" },
+    { t: 124.16, text: "Porque aunque estoy medio ciego desde tan lejos te vi" },
+    { t: 129.28, text: "Mi memoria es una mierda" },
+    { t: 132.16, text: "Pero siempre me acuerdo de ti" },
+    { t: 135.44, text: "No sé diferenciar entre una alfombra y un tapiz" },
+    { t: 140.22, text: "Si antes no servía pa' nada" },
+    { t: 143.36, text: "Y ahora sirvo pa' quererte a ti" },
+    { t: 148.64, text: "Pa' quererte a ti" },
+    { t: 150.78, text: "Ahora sirvo pa' quererte a ti" },
+    { t: 154.26, text: "Pa' quererte a ti" },
+    { t: 156.44, text: "Ah, ah, ah" }
+  ];
+
+  function buildLyricPoints(text, pxWidth) {
+    var off = document.createElement('canvas');
+    var octx = off.getContext('2d');
+    var fontPx = 110;
+    var font = 'italic 600 ' + fontPx + 'px Georgia, "Times New Roman", serif';
+    octx.font = font;
+    var w = Math.ceil(octx.measureText(text).width) + 40;
+    var h = fontPx + 60;
+    off.width = w; off.height = h;
+    octx.font = font;
+    octx.fillStyle = '#fff';
+    octx.textAlign = 'center';
+    octx.textBaseline = 'middle';
+    octx.fillText(text, w / 2, h / 2);
+    var data = octx.getImageData(0, 0, w, h).data;
+    var pts = [], step = 3;
+    for (var y = 0; y < h; y += step) {
+      for (var x = 0; x < w; x += step) {
+        if (data[(y * w + x) * 4 + 3] > 128) pts.push([x, y]);
+      }
+    }
+    var sc = pxWidth / w;
+    var out = [];
+    for (var p = 0; p < pts.length; p++) {
+      out.push([(pts[p][0] - w / 2) * sc, -(pts[p][1] - h / 2) * sc]);
+    }
+    return out;
+  }
+
+  var btnShape = document.getElementById('toggleShape');
+  btnShape.addEventListener('click', function () {
+    if (morphTarget < 0.5) {
+      morphTarget = 1;
+      btnShape.textContent = '\u2764\uFE0F Volver al coraz\u00f3n';
+    } else {
+      morphTarget = 0;
+      btnShape.textContent = '\u2728 I LOVE U <3';
+    }
+  });
+
+  var btnMusic = document.getElementById('toggleMusic');
+  btnMusic.addEventListener('click', function () {
+    lyricsOn = !lyricsOn;
+    if (lyricsOn) {
+      audio.currentTime = 0;
+      audio.play().catch(function () {});
+      curLine = -1;
+      btnMusic.textContent = '\u23F8 Pausar m\u00fasica';
+    } else {
+      audio.pause();
+      btnMusic.textContent = '\uD83C\uDFB5 M\u00fasica';
+    }
+  });
+
+  window.addEventListener('resize', resize);
+  resize();
+  requestAnimationFrame(animate);
+})();
+</script>
+</body>
+</html>
